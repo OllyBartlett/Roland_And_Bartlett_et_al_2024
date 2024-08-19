@@ -1,4 +1,6 @@
+//Satellites evidence sustained greening of the Antarctic Peninsula v1.0 Legacy
 //Roland and Bartlett et al., 2024
+//Written by Dr Olly Bartlett, o.bartlett@herts.ac.uk
 // AP vegetation mapping LANDSAT 4,5,7,8 - Harmonized 
 // 0.1 Import sample area tesselation
 var aoi = ee.FeatureCollection('users/ob285/hexes/aphex')
@@ -121,7 +123,7 @@ apcol = apcol.filter(bad_data_filter.not());
 
 //1.0 Create AP wide annual mosaics
 //1.1 List years of images - from preliminary analysis to identify viewable years
-var years = [1986,1987,1988,1989,1990,1991,	1997,	2000,	2004,	2005,	2006,	2009,	2010,	2011,	2012,	2013,	2014,	2015,	2016,	2017,	2018,	2020, 2021
+var years = [1986,1987,1988,1989,1990,1991,1997,2000,2004,2005,2006,2009,2010,2011,2012,2013,2014,2015,2016,2017,2018,2020,2021
 ];
 //1.2 Generate annual maximum NDVI and TCG mosaics for entire study area
 var greenComp = ee.ImageCollection.fromImages(years.map(function(y) {
@@ -146,7 +148,7 @@ var annVar = function(feature) {
     //Filter composites by year
     var filt = ee.Filter.eq('year', year)
     var img = greenComp.filter(filt).first()
-    //Find pixels in composite above vegetation index threshold - set for NDVI change to greenness_max for TCG - calculate masked area in separate code //GITHUB LINK TO BE ADDED//
+    //Find pixels in composite above vegetation index threshold - set for NDVI change to greenness_max for TCG 
     var ndviT = 0.2
     var ndvi01 = img.select('NDVI_max').gte(ndviT);
     img = img.updateMask(ndvi01);
