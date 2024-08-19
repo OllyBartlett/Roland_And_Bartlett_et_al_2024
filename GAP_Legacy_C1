@@ -1,0 +1,187 @@
+//Roland and Bartlett et al., 2024
+// AP vegetation mapping LANDSAT 4,5,7,8 - Harmonized 
+// 0.1 Import sample area tesselation
+var aoi = ee.FeatureCollection('users/ob285/hexes/aphex')
+var aoiBuff = ee.FeatureCollection('users/ob285/hexes/aprbhex')
+
+//0.2 Harmonise Landsat TOA reflectance - ETM+ to OLI (Roy et al., 2016)
+//https://developers.google.com/earth-engine/tutorials/community/landsat-etm-to-oli-harmonization
+var coefficients = {
+  itcps: ee.Image.constant([0.0173, 0.0153, 0.0107, 0.0374, 0.0260, 0.0490]),
+  slopes: ee.Image.constant([ 0.8707,  0.8707, 0.9175, 0.9281, 0.9414,  0.9352])
+};
+//Define function to get and rename bands of interest from OLI.
+function renameOLI(img) {
+  return img.select(
+		['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'BQA'],
+		['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2', 'BQA']
+	);
+}
+//Define function to get and rename bands of interest from ETM+.
+function renameETM(img) {
+  return img.select(
+		['B1', 'B2', 'B3', 'B4', 'B5', 'B7', 'BQA'],
+		['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2', 'BQA']
+  );
+}
+//Define function to apply harmonization transformation.
+function etm2oli(img) {
+  return img.select(['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2']).multiply(10000)
+    .multiply(coefficients.slopes)
+    .add(coefficients.itcps)
+    .round()
+    .float()
+    .addBands(img.select('BQA')
+  );
+}
+
+//0.3 Cloud and shadow masking - fmask function (Zhu et al., 2015)
+function fmask(img) {
+  var cloudShadowBitMask = 5 << 8;
+  var cloudsBitMask = 4 << 4;
+  var qa = img.select('BQA');
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+    .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+  return img.updateMask(mask);
+}
+
+//0.4 NDVI calculation
+function calcNDVI(img) {
+  var ndvi = img.normalizedDifference(['NIR', 'Red']).rename('NDVI');
+  return img.addBands(ndvi);
+}
+var ndviParams = {min: -1, max: 1, palette: ['blue', 'white', 'green']};
+
+//0.5 TCG harmonized calculation - TCG Coefficients for OLI imagery 
+function calcTCG(img) {
+var b = img.select('Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2');
+ var greencoeff = ee.Image([-0.3344, -0.3544, -0.4556, 0.6966, -0.0242, -0.2630]);
+ var greenness = img.expression(
+    '(B * GREENNESS)',
+            {
+                'B':b,
+                'GREENNESS': greencoeff
+                }
+            );
+  greenness = greenness.reduce(ee.call("Reducer.sum"));
+  var tcg = ee.Image(greenness).rename('greenness');
+  return img.addBands(tcg);
+}
+var greenParams = {min: 0, max: 0.2, palette: ['white', 'green']};
+
+//0.6 Define function to prepare OLI images.
+function prepOli(img) {
+  var orig = img;
+  img = renameOLI(img);
+  img = fmask(img);
+  img = calcTCG(img);
+  img = calcNDVI(img);
+    return ee.Image(img.copyProperties(orig, orig.propertyNames()));
+}
+//0.7 Define function to prepare ETM+ images.
+function prepEtm(img) {
+  var orig = img;
+  img = renameETM(img);
+  img = fmask(img);
+  img = etm2oli(img);
+  img = calcTCG(img).divide(10000);
+  img = calcNDVI(img);
+  return ee.Image(img.copyProperties(orig, orig.propertyNames()));
+}
+
+//0.8 Import REMA DEM and clip to aoi
+var rema = ee.Image('UMN/PGC/REMA/V1_1/8m');
+rema = rema.clip(aoi);
+
+//0.9 Import collections
+var l8Col = ee.ImageCollection('LANDSAT/LC08/C01/T2_TOA');
+var l7Col = ee.ImageCollection('LANDSAT/LE07/C01/T2_TOA');
+var l5Col = ee.ImageCollection('LANDSAT/LT05/C01/T2_TOA');
+var l4Col = ee.ImageCollection('LANDSAT/LT04/C01/T2_TOA');
+//0.10 Define collection filter
+var colFilter = ee.Filter.and(
+  ee.Filter.calendarRange(3,3,'month'),
+  ee.Filter.bounds(aoi),
+  ee.Filter.lt('CLOUD_COVER_LAND', 40),
+  ee.Filter.or(
+    ee.Filter.eq('IMAGE_QUALITY_OLI', 9),
+    ee.Filter.eq('IMAGE_QUALITY', 9)));
+//0.11 Filter the collections remove clouds
+l8Col = l8Col.filter(colFilter).map(prepOli);
+l7Col = l7Col.filter(colFilter).map(prepEtm);
+l5Col = l5Col.filter(colFilter).map(prepEtm);
+l4Col = l4Col.filter(colFilter).map(prepEtm);
+//0.12 Merge the collections
+var apcol = l8Col.merge(l7Col).merge(l5Col).merge(l4Col);
+//0.13 Filter poor data - 2019 OLI images
+var start_bad_data = '2019-01-01T00:00:00';
+var end_bad_data = '2019-12-01T00:00:00';
+var bad_data_filter = ee.Filter.date(start_bad_data, end_bad_data);
+apcol = apcol.filter(bad_data_filter.not());
+
+//1.0 Create AP wide annual mosaics
+//1.1 List years of images - from preliminary analysis to identify viewable years
+var years = [1986,1987,1988,1989,1990,1991,	1997,	2000,	2004,	2005,	2006,	2009,	2010,	2011,	2012,	2013,	2014,	2015,	2016,	2017,	2018,	2020, 2021
+];
+//1.2 Generate annual maximum NDVI and TCG mosaics for entire study area
+var greenComp = ee.ImageCollection.fromImages(years.map(function(y) {
+  var filtered = apcol.filter(ee.Filter.calendarRange({
+    start: y,
+    field: 'year'
+  }));
+  var composite = filtered.select('NDVI').reduce(ee.Reducer.max());
+  var tcgBand = filtered.select('greenness').reduce(ee.Reducer.max())
+  composite = composite.addBands(tcgBand)
+  composite = composite.set('year', y)
+  composite = composite.updateMask(rema.select('elevation').lte(300))
+  return composite
+}));
+
+//2.0 Calculate total area above index threshold for each hexagon in the tesselation - NDVI t = 0.2, TCG t = 0
+var annVar = function(feature) {
+  //Annual iteration function
+  var annVarAdd = function(year, feat) {
+    year = ee.Number(year).toInt()
+    feat = ee.Feature(feat)
+    //Filter composites by year
+    var filt = ee.Filter.eq('year', year)
+    var img = greenComp.filter(filt).first()
+    //Find pixels in composite above vegetation index threshold - set for NDVI change to greenness_max for TCG - calculate masked area in separate code //GITHUB LINK TO BE ADDED//
+    var ndviT = 0.2
+    var ndvi01 = img.select('NDVI_max').gte(ndviT);
+    img = img.updateMask(ndvi01);
+    var area = ee.Image.pixelArea(); //get pixel area
+    var ndviArea = ndvi01.multiply(area).rename('ndviArea');
+    img = img.addBands(ndviArea);
+    
+    //Sum area of pixels above threshold 
+    var stats = ndviArea.reduceRegion({
+      reducer: ee.Reducer.sum(), 
+      geometry: feature.geometry(), 
+      scale: 30,
+      maxPixels: 10e12
+    });
+    //Set annual vegetation index area properties
+    var ndviA = ee.Number(stats.get("ndviArea"))
+    var ndviYr = ee.String("NDVI_Area_").cat(year)
+    return feat.set(ndviYr, ndviA)
+  }
+  //Iterate through all the years within the hexagon
+  var newfeat = ee.Feature(ee.List(years).iterate(annVarAdd, feature))
+  //Return hexagon with annual vegetated area added
+  return newfeat
+}
+
+//3.0 Calculate areas over all hexagons for all years
+var yearNdvi = aoiBuff.map(annVar);
+
+
+//4.0 Export
+Export.table.toDrive({
+  collection: yearNdvi,
+  description: 'exportAllAreas',
+  folder: 'GAP',
+  fileNamePrefix:  'GAP_NDVI_Results',
+  fileFormat: 'CSV'
+});
+
