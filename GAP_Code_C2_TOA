@@ -1,0 +1,264 @@
+// Satellites evidence sustained greening of the Antarctic Peninsula
+// Roland and Bartlett et al., 2024 
+// Code written by Dr Olly Bartlett - o.bartlett@herts.ac.uk
+// AP vegetation mapping LANDSAT 4,5,7,8 - Harmonized
+
+// 1 Import ice-free area polygons and the buffered area divided by a hexagonal grid, hex area 5000km2
+var aoi = ee.FeatureCollection('users/ob285/hexes/aphex'); 
+var aoiBuff = ee.FeatureCollection('users/ob285/hexes/aprbhex');
+
+// 2 Harmonise Landsat TM, ETM and OLI according to Roy et al., 2016
+var coefficients = {
+  itcps: ee.Image.constant([0.0173, 0.0153, 0.0107, 0.0374, 0.0260, 0.0490]),
+  slopes: ee.Image.constant([0.8707, 0.8707, 0.9175, 0.9281, 0.9414, 0.9352])
+};
+
+// 2.1 Define function for OLI and synchronise band names.
+function renameOLI(img) {
+  return img.select(
+    ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'QA_PIXEL'],
+    ['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2', 'BQA']
+  );
+}
+
+// 2.2 Define function for ETM and synchronise band names.
+function renameETM(img) {
+  return img.select(
+    ['B1', 'B2', 'B3', 'B4', 'B5', 'B7', 'QA_PIXEL'],
+    ['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2', 'BQA']
+  );
+}
+
+// 2.3 Define harmonisation transformation function.
+function etm2oli(img) {
+  return img.select(['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2']).multiply(10000)
+    .multiply(coefficients.slopes)
+    .add(coefficients.itcps)
+    .round()
+    .float()
+    .addBands(img.select('BQA'));
+}
+
+// 3 Cloud and shadow masking as per FMask algorithm
+function fmask(img) {
+  var cloudShadowBitMask = 1 << 3;
+  var cloudsBitMask = 1 << 5;
+  var qa = img.select('BQA');
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+    .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+  return img.updateMask(mask);
+}
+
+// 4 NDVI calculation
+function calcNDVI(img) {
+  var ndvi = img.normalizedDifference(['NIR', 'Red']).rename('NDVI');
+  return img.addBands(ndvi);
+}
+
+// 5 TCG harmonized calculation
+function calcTCG(img) {
+  var b = img.select('Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2');
+  var greencoeff = ee.Image([-0.3344, -0.3544, -0.4556, 0.6966, -0.0242, -0.2630]);
+  var greenness = img.expression(
+    '(B * GREENNESS)',
+    {
+      'B': b,
+      'GREENNESS': greencoeff
+    }
+  );
+  greenness = greenness.reduce(ee.Reducer.sum());
+  var tcg = ee.Image(greenness).rename('greenness');
+  return img.addBands(tcg);
+}
+
+// 6 Define function to prepare OLI images.
+function prepOli(img) {
+  var orig = img;
+  img = renameOLI(img);
+  img = fmask(img);
+  img = calcTCG(img);
+  img = calcNDVI(img);
+  return ee.Image(img.copyProperties(orig, orig.propertyNames()));
+}
+
+// 7 Define function to prepare ETM+ images.
+function prepEtm(img) {
+  var orig = img;
+  img = renameETM(img);
+  img = fmask(img);
+  img = etm2oli(img);
+  img = calcTCG(img).divide(10000);
+  img = calcNDVI(img);
+  return ee.Image(img.copyProperties(orig, orig.propertyNames()));
+}
+
+// 8 Import REMA DEM and clip to aoi for sampling only elevations below 300 m a.s.l.
+var rema = ee.Image('UMN/PGC/REMA/V1_1/8m');
+rema = rema.clip(aoi);
+
+// 9 Import Landsat collections (Collection 2 Top of Atmosphere [NOTE: original code used C1])
+var l8Col = ee.ImageCollection('LANDSAT/LC08/C02/T2_TOA');
+var l7Col = ee.ImageCollection('LANDSAT/LE07/C02/T2_TOA');
+var l5Col = ee.ImageCollection('LANDSAT/LT05/C02/T2_TOA');
+var l4Col = ee.ImageCollection('LANDSAT/LT04/C02/T2_TOA');
+
+// 10 Define collection filter 
+var colFilter = ee.Filter.and(
+  ee.Filter.calendarRange(3, 3, 'month'),
+  ee.Filter.bounds(aoi),
+  ee.Filter.lt('CLOUD_COVER_LAND', 40),
+  ee.Filter.or(
+    ee.Filter.eq('IMAGE_QUALITY_OLI', 9),
+    ee.Filter.eq('IMAGE_QUALITY', 9)
+  )
+);
+
+// 11 Filter the collections, harmonise, mask clouds and calculate vegetation metrics
+l8Col = l8Col.filter(colFilter).map(prepOli);
+l7Col = l7Col.filter(colFilter).map(prepEtm);
+l5Col = l5Col.filter(colFilter).map(prepEtm);
+l4Col = l4Col.filter(colFilter).map(prepEtm);
+
+// 12 Merge the preprocessed collections
+var apcol = l8Col.merge(l7Col).merge(l5Col).merge(l4Col);
+
+// 12.1 Filter poor data - 2019 OLI images - images observed to be faulty during this year AP wide
+var start_bad_data = '2019-01-01T00:00:00';
+var end_bad_data = '2019-12-01T00:00:00';
+var bad_data_filter = ee.Filter.date(start_bad_data, end_bad_data);
+apcol = apcol.filter(bad_data_filter.not());
+
+// 13 Create AP-wide annual mosaics
+// 13.1 Provide list of years where imagery is available meeting the filter and quality criteria
+var years = [1986, 1987, 1988, 1989, 1990, 1991, 1997, 2000, 2004, 2005, 2006, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2020, 2021];
+
+// 13.2 Generate maximum greeness mosaics for each year 
+var greenComp = ee.ImageCollection.fromImages(years.map(function(y) {
+  var filtered = apcol.filter(ee.Filter.calendarRange({
+    start: y,
+    field: 'year'
+  }));
+  var composite = filtered.select('NDVI').reduce(ee.Reducer.max());
+  var tcgBand = filtered.select('greenness').reduce(ee.Reducer.max());
+  composite = composite.addBands(tcgBand);
+  composite = composite.set('year', y);
+  composite = composite.updateMask(rema.select('elevation').lte(300));
+  return composite;
+}));
+
+// 14 Function to calculate NDVI > 0.2 area
+function calculateNdviArea(feature) {
+  var annVarAdd = function(year, feat) {
+    year = ee.Number(year).toInt();
+    feat = ee.Feature(feat);
+    var filt = ee.Filter.eq('year', year);
+    var img = greenComp.filter(filt).first();
+    
+    var ndviT = 0.2;
+    var ndvi01 = img.select('NDVI_max').gte(ndviT);
+    var area = ee.Image.pixelArea();
+    var ndviArea = ndvi01.multiply(area).rename('ndviArea');
+    
+    var stats = ndviArea.reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: feature.geometry(),
+      scale: 30,
+      maxPixels: 10e12
+    });
+    
+    var ndviA = ee.Number(stats.get("ndviArea"));
+    var ndviYr = ee.String("NDVI_Area_").cat(year);
+    return feat.set(ndviYr, ndviA);
+  };
+  
+  return ee.Feature(ee.List(years).iterate(annVarAdd, feature));
+}
+
+// 15 Function to calculate TCG >0 area
+function calculateTcgArea(feature) {
+  var annVarAdd = function(year, feat) {
+    year = ee.Number(year).toInt();
+    feat = ee.Feature(feat);
+    var filt = ee.Filter.eq('year', year);
+    var img = greenComp.filter(filt).first();
+    
+    var tcgT = 0;
+    var tcg01 = img.select('greenness_max').gte(tcgT);
+    var area = ee.Image.pixelArea();
+    var tcgArea = tcg01.multiply(area).rename('tcgArea');
+    
+    var stats = tcgArea.reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: feature.geometry(),
+      scale: 30,
+      maxPixels: 10e12
+    });
+    
+    var tcgA = ee.Number(stats.get("tcgArea"));
+    var tcgYr = ee.String("TCG_Area_").cat(year);
+    return feat.set(tcgYr, tcgA);
+  };
+  
+  return ee.Feature(ee.List(years).iterate(annVarAdd, feature));
+}
+
+// 16 Function to calculate Cloud Cover area across entire hexagon - (area removed by masking for clouds)
+function calculateCloudArea(feature) {
+  var annVarAdd = function(year, feat) {
+    year = ee.Number(year).toInt();
+    feat = ee.Feature(feat);
+    var filt = ee.Filter.eq('year', year);
+    var img = greenComp.filter(filt).first();
+    
+    var cc = img.select('NDVI_max').unmask(-9999);
+    var ccT = -9999;
+    var cc01 = cc.select('NDVI_max').eq(ccT);
+    var area = ee.Image.pixelArea();
+    var ccArea = cc01.multiply(area).rename('ccArea');
+    
+    var stats = ccArea.reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: feature.geometry(),
+      scale: 30,
+      maxPixels: 10e12
+    });
+    
+    var ccA = ee.Number(stats.get("ccArea"));
+    var ccYr = ee.String("CC_Area_").cat(year);
+    return feat.set(ccYr, ccA);
+  };
+  
+  return ee.Feature(ee.List(years).iterate(annVarAdd, feature));
+}
+
+// 17 Map areas where pixels exceed vegetation index thresholds...
+// ...for each hexbin and export
+// 17.1 NDVI >0.2 Area Calculation and Export
+var yearNdvi = aoiBuff.map(calculateNdviArea);
+Export.table.toDrive({
+  collection: yearNdvi,
+  description: 'NDVI_Area_Export',
+  folder: 'GAP',
+  fileNamePrefix: 'GAP_NDVI_Area',
+  fileFormat: 'CSV'
+});
+
+// 17.2 TCG >0 Area Calculation and Export
+var yearTcg = aoiBuff.map(calculateTcgArea);
+Export.table.toDrive({
+  collection: yearTcg,
+  description: 'TCG_Area_Export',
+  folder: 'GAP',
+  fileNamePrefix: 'GAP_TCG_Area',
+  fileFormat: 'CSV'
+});
+
+// 17.3 Cloud Cover Area Calculation and Export
+var yearCloud = aoiBuff.map(calculateCloudArea);
+Export.table.toDrive({
+  collection: yearCloud,
+  description: 'Cloud_Area_Export',
+  folder: 'GAP',
+  fileNamePrefix: 'GAP_Cloud_Area',
+  fileFormat: 'CSV'
+});
