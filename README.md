@@ -1,5 +1,5 @@
 # Sustained greening of the Antarctic Peninsula observed from satellites 
-Google Earth Engine JS code used in "Sustained greening of the Antarctic Peninsula observed from satellites",  Roland and Bartlett et al., 2024.. 
+Google Earth Engine JS code used in "Sustained greening of the Antarctic Peninsula observed from satellites", [Roland and Bartlett et al., 2024](https://rdcu.be/dV0dc)
 
 # Code used to generate study results, GAP_Legacy_C1
 The study was conducted from 2019 to 2022 before the availability of LANDSAT Collection 2. The code presented here reflects the code used to generate the results presented in the paper. This code will not work in GEE as collection 1 is now a legacy asset and removed from the platform. 
